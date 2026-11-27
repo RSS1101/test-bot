@@ -35,11 +35,20 @@ jobs:
         if: vars.EDGEONE_PREVIEW_PROJECT != ''
         env:
           EDGEONE_API_TOKEN: ${{ secrets.EDGEONE_API_TOKEN }}
+          EDGEONE_PAGES_API_REGION: china
+          PAGES_SOURCE: skills
           PROJECT: ${{ vars.EDGEONE_PREVIEW_PROJECT }}
         run: |
           test -n "$EDGEONE_API_TOKEN"
-          npx --yes edgeone@1.7.7 makers deploy dist -n "$PROJECT" -t "$EDGEONE_API_TOKEN" -e preview --platform skill-codex --json > "$RUNNER_TEMP/edgeone.jsonl"
-          url="$(tail -n 1 "$RUNNER_TEMP/edgeone.jsonl" | jq -er 'select(.status == "success") | .url | select(startswith("https://"))')"
+          result="$RUNNER_TEMP/edgeone.jsonl"
+          if npx --yes edgeone@1.7.7 makers deploy dist -n "$PROJECT" -t "$EDGEONE_API_TOKEN" -e preview --platform skill-codex --json > "$result"; then
+            url="$(tail -n 1 "$result" | jq -er 'select(.status == "success") | .url | select(startswith("https://"))')"
+          else
+            status=$?
+            code="$(tail -n 1 "$result" | jq -r '(.errorCode // empty) | tostring | select(test("^[A-Z0-9_.-]{1,60}$"))' 2>/dev/null || true)"
+            printf '::error::EdgeOne CLI exited with status %s (%s)\n' "$status" "${code:-no error code}"
+            exit "$status"
+          fi
           printf 'url=%s\n' "$url" >> "$GITHUB_OUTPUT"
           printf '[Open preview](%s)\n' "$url" >> "$GITHUB_STEP_SUMMARY"
       - name: Publish or update the PR preview comment
