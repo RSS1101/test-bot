@@ -1,0 +1,92 @@
+name: Build and preview on EdgeOne
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+concurrency:
+  group: edgeone-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm run build
+      - name: Upload built site
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: preview-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  preview:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: preview-dist
+          path: ${{ runner.temp }}/edgeone-dist
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Deploy built site to EdgeOne Makers
+        id: deploy
+        env:
+          EDGEONE_API_TOKEN: ${{ secrets.EDGEONE_API_TOKEN }}
+          EDGEONE_PAGES_API_REGION: china
+          PAGES_SOURCE: skills
+          PROJECT: ${{ vars.EDGEONE_PREVIEW_PROJECT }}
+        run: |
+          if [[ -z "$PROJECT" || -z "$EDGEONE_API_TOKEN" ]]; then
+            echo "::error::Configure EDGEONE_PREVIEW_PROJECT and EDGEONE_API_TOKEN."
+            exit 1
+          fi
+          result="$RUNNER_TEMP/edgeone.jsonl"
+          if npx --yes edgeone@1.7.7 makers deploy "$RUNNER_TEMP/edgeone-dist" -n "$PROJECT" -t "$EDGEONE_API_TOKEN" -e preview --platform skill-codex --json > "$result"; then
+            url="$(tail -n 1 "$result" | jq -er 'select(.status == "success") | .url | select(startswith("https://"))')"
+          else
+            status=$?
+            code="$(tail -n 1 "$result" | jq -r '(.errorCode // empty) | tostring | select(test("^[A-Z0-9_.-]{1,60}$"))' 2>/dev/null || true)"
+            printf '::error::EdgeOne CLI exited with status %s (%s)\n' "$status" "${code:-no error code}"
+            exit "$status"
+          fi
+          printf 'url=%s\n' "$url" >> "$GITHUB_OUTPUT"
+          printf '[打开 EdgeOne 预览](%s)\n' "$url" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish or update PR preview comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PREVIEW_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          endpoint="repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments"
+          marker='<!-- edgeone-makers-preview -->'
+          body="$(printf '%s\n[打开 EdgeOne 预览](%s)\n\n提交：%s\n' "$marker" "$PREVIEW_URL" "$HEAD_SHA")"
+          comment_id="$(gh api --paginate "$endpoint" | jq -sr --arg marker "$marker" 'flatten | map(select(.user.login == "github-actions[bot]" and (.body | startswith($marker)))) | first | .id // empty')"
+          if [[ -n "$comment_id" ]]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" -f body="$body" --silent
+          else
+            gh api --method POST "$endpoint" -f body="$body" --silent
+          fi
