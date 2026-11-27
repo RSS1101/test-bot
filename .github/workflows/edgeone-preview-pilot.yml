@@ -1,0 +1,37 @@
+name: EdgeOne preview pilot
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare static preview
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          mkdir -p dist
+          printf '<!doctype html><meta charset="utf-8"><title>EdgeOne pilot</title><h1>Preview for PR #%s</h1><p>Build %s</p>\n' "$PR_NUMBER" "$GITHUB_SHA" > dist/index.html
+          test -s dist/index.html
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: edgeone-preview-site
+          path: dist/
+          if-no-files-found: error
+      - name: Publish to EdgeOne Makers
+        if: vars.EDGEONE_PREVIEW_PROJECT != ''
+        env:
+          EDGEONE_API_TOKEN: ${{ secrets.EDGEONE_API_TOKEN }}
+          PROJECT: ${{ vars.EDGEONE_PREVIEW_PROJECT }}
+        run: |
+          test -n "$EDGEONE_API_TOKEN"
+          npx --yes edgeone@1.7.7 makers deploy dist -n "$PROJECT" -t "$EDGEONE_API_TOKEN" -e preview --platform skill-codex --json > "$RUNNER_TEMP/edgeone.jsonl"
+          url="$(tail -n 1 "$RUNNER_TEMP/edgeone.jsonl" | jq -er 'select(.status == "success") | .url | select(startswith("https://"))')"
+          printf '[Open preview](%s)\n' "$url" >> "$GITHUB_STEP_SUMMARY"
